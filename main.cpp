@@ -206,13 +206,13 @@ public:
     void find(const string& key) {
         int pos = findIndexPos(key);
         if (pos == -1) {
-            cout << "null" << endl;
+            printf("null\n");
             return;
         }
 
         IndexEntry entry = readIndexEntry(pos);
         if (entry.count == 0) {
-            cout << "null" << endl;
+            printf("null\n");
             return;
         }
 
@@ -220,10 +220,10 @@ public:
         readValues(entry.offset, entry.count, values);
 
         for (int i = 0; i < entry.count; i++) {
-            if (i > 0) cout << " ";
-            cout << values[i];
+            if (i > 0) printf(" ");
+            printf("%d", values[i]);
         }
-        cout << endl;
+        printf("\n");
 
         delete[] values;
     }
@@ -278,31 +278,28 @@ public:
 };
 
 int main() {
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
-
     int n;
-    cin >> n;
+    scanf("%d", &n);
 
     FileStorage storage;
 
     for (int i = 0; i < n; i++) {
-        string cmd;
-        cin >> cmd;
+        char cmd[20];
+        scanf("%s", cmd);
 
-        if (cmd == "insert") {
-            string key;
+        if (strcmp(cmd, "insert") == 0) {
+            char key[MAX_INDEX_LEN + 1];
             int value;
-            cin >> key >> value;
+            scanf("%s%d", key, &value);
             storage.insert(key, value);
-        } else if (cmd == "delete") {
-            string key;
+        } else if (strcmp(cmd, "delete") == 0) {
+            char key[MAX_INDEX_LEN + 1];
             int value;
-            cin >> key >> value;
+            scanf("%s%d", key, &value);
             storage.remove(key, value);
-        } else if (cmd == "find") {
-            string key;
-            cin >> key;
+        } else if (strcmp(cmd, "find") == 0) {
+            char key[MAX_INDEX_LEN + 1];
+            scanf("%s", key);
             storage.find(key);
         }
     }
