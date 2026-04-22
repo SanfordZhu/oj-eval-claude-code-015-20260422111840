@@ -18,21 +18,66 @@ struct IndexEntry {
     char index[MAX_INDEX_LEN + 1];
     int offset;
     int count;
-    int next;  // next entry with same key (for duplicate keys)
-    int prev;  // previous entry (for deletion)
 };
 
 struct IndexBlock {
     IndexEntry entries[INDEX_BLOCK_SIZE];
     int count;
     int nextBlock;
-    int freeHead;  // head of free list
+};
+
+struct DataHeader {
+    int freeHead;
+    int fileSize;
 };
 
 class FileStorage {
 private:
     string indexFile;
     string dataFile;
+
+    void initFiles() {
+        ifstream idx(indexFile, ios::binary | ios::ate);
+        if (!idx.is_open() || idx.tellg() == 0) {
+            idx.close();
+            ofstream outIdx(indexFile, ios::binary | ios::trunc);
+            outIdx.close();
+        } else {
+            idx.close();
+        }
+
+        ifstream data(dataFile, ios::binary | ios::ate);
+        if (!data.is_open() || data.tellg() == 0) {
+            data.close();
+            DataHeader header = {};
+            header.freeHead = -1;
+            header.fileSize = sizeof(DataHeader);
+            ofstream outData(dataFile, ios::binary | ios::trunc);
+            outData.write((char*)&header, sizeof(DataHeader));
+            outData.close();
+        } else {
+            data.close();
+        }
+    }
+
+    DataHeader readDataHeader() {
+        DataHeader header = {};
+        ifstream data(dataFile, ios::binary);
+        if (data.is_open()) {
+            data.read((char*)&header, sizeof(DataHeader));
+            data.close();
+        }
+        return header;
+    }
+
+    void writeDataHeader(const DataHeader& header) {
+        fstream data(dataFile, ios::binary | ios::in | ios::out);
+        if (data.is_open()) {
+            data.seekp(0, ios::beg);
+            data.write((char*)&header, sizeof(DataHeader));
+            data.close();
+        }
+    }
 
     int getIndexBlockCount() {
         ifstream idx(indexFile, ios::binary | ios::ate);
@@ -46,7 +91,6 @@ private:
         IndexBlock block = {};
         block.count = 0;
         block.nextBlock = -1;
-        block.freeHead = -1;
 
         ifstream idx(indexFile, ios::binary);
         if (idx.is_open()) {
@@ -144,7 +188,6 @@ private:
             IndexBlock block = {};
             block.count = 1;
             block.nextBlock = -1;
-            block.freeHead = -1;
             block.entries[0] = entry;
             appendIndexBlock(block);
             return;
@@ -166,7 +209,6 @@ private:
         IndexBlock newBlock = {};
         newBlock.count = 0;
         newBlock.nextBlock = block.nextBlock;
-        newBlock.freeHead = -1;
 
         for (int i = splitPos; i < INDEX_BLOCK_SIZE; i++) {
             newBlock.entries[newBlock.count++] = block.entries[i];
@@ -242,13 +284,84 @@ private:
         }
     }
 
-    void appendValues(const int* values, int count, int& offset) {
-        ofstream data(dataFile, ios::binary | ios::app);
+    void writeValues(int offset, const int* values, int count) {
+        fstream data(dataFile, ios::binary | ios::in | ios::out);
         if (data.is_open()) {
-            offset = data.tellp();
+            data.seekp(offset, ios::beg);
             data.write((char*)values, count * sizeof(int));
             data.close();
         }
+    }
+
+    int allocateDataSpace(int size) {
+        DataHeader header = readDataHeader();
+
+        int prevFree = -1;
+        int currFree = header.freeHead;
+
+        while (currFree != -1) {
+            struct FreeBlock {
+                int offset;
+                int size;
+                int next;
+            } freeBlock;
+
+            ifstream data(dataFile, ios::binary);
+            data.seekg(currFree, ios::beg);
+            data.read((char*)&freeBlock, sizeof(FreeBlock));
+            data.close();
+
+            if (freeBlock.size >= size) {
+                if (prevFree == -1) {
+                    header.freeHead = freeBlock.next;
+                } else {
+                    struct FreeBlock prev;
+                    ifstream data2(dataFile, ios::binary);
+                    data2.seekg(prevFree, ios::beg);
+                    data2.read((char*)&prev, sizeof(FreeBlock));
+                    data2.close();
+                    prev.next = freeBlock.next;
+                    writeValues(prevFree, (int*)&prev, 2);
+                }
+                writeDataHeader(header);
+                return currFree;
+            }
+
+            prevFree = currFree;
+            currFree = freeBlock.next;
+        }
+
+        int offset = header.fileSize;
+        header.fileSize += size + 12;
+        writeDataHeader(header);
+
+        int negOne = -1;
+        fstream data(dataFile, ios::binary | ios::in | ios::out);
+        data.seekp(offset, ios::beg);
+        data.write((char*)&size, sizeof(int));
+        data.write((char*)&negOne, sizeof(int));
+        data.write((char*)&negOne, sizeof(int));
+        data.close();
+
+        return offset + 12;
+    }
+
+    void freeDataSpace(int offset, int size) {
+        DataHeader header = readDataHeader();
+
+        struct FreeBlock {
+            int offset;
+            int size;
+            int next;
+        } freeBlock;
+        freeBlock.offset = offset;
+        freeBlock.size = size;
+        freeBlock.next = header.freeHead;
+
+        writeValues(offset, (int*)&freeBlock, 3);
+
+        header.freeHead = offset;
+        writeDataHeader(header);
     }
 
     int findValuePos(int offset, int count, int value) {
@@ -281,7 +394,12 @@ private:
         for (int i = count; i > pos; i--) values[i] = values[i - 1];
         values[pos] = value;
 
-        appendValues(values, count + 1, *newOffset);
+        int newSize = (count + 1) * sizeof(int);
+        int newOff = allocateDataSpace(newSize);
+        writeValues(newOff, values, count + 1);
+        freeDataSpace(offset, count * sizeof(int));
+
+        *newOffset = newOff;
         *newCount = count + 1;
 
         delete[] values;
@@ -300,10 +418,13 @@ private:
         }
 
         if (count == 0) {
+            freeDataSpace(offset, 0);
             *newOffset = -1;
             *newCount = 0;
         } else {
-            appendValues(values, count, *newOffset);
+            writeValues(offset, values, count);
+            freeDataSpace(offset + count * sizeof(int), sizeof(int));
+            *newOffset = offset;
             *newCount = count;
         }
 
@@ -311,7 +432,9 @@ private:
     }
 
 public:
-    FileStorage() : indexFile(INDEX_FILE), dataFile(DATA_FILE) {}
+    FileStorage() : indexFile(INDEX_FILE), dataFile(DATA_FILE) {
+        initFiles();
+    }
 
     void find(const string& key) {
         IndexEntry entry = findEntry(key);
@@ -339,19 +462,65 @@ public:
         if (entry.count == 0) {
             int* values = new int[1];
             values[0] = value;
-            appendValues(values, 1, newOffset);
+            int newOff = allocateDataSpace(sizeof(int));
+            writeValues(newOff, values, 1);
             delete[] values;
             newCount = 1;
 
             IndexEntry newEntry = {};
             strncpy(newEntry.index, key.c_str(), MAX_INDEX_LEN);
             newEntry.index[MAX_INDEX_LEN] = '\0';
-            newEntry.offset = newOffset;
+            newEntry.offset = newOff;
             newEntry.count = newCount;
-            newEntry.next = -1;
-            newEntry.prev = -1;
 
-            insertEntry(newEntry);
+            int insertBlockNum, insertPos;
+            findInsertPos(newEntry.index, insertBlockNum, insertPos);
+            if (insertBlockNum == -1) {
+                IndexBlock block = {};
+                block.count = 1;
+                block.nextBlock = -1;
+                block.entries[0] = newEntry;
+                appendIndexBlock(block);
+            } else {
+                IndexBlock block = readIndexBlock(insertBlockNum);
+                if (block.count < INDEX_BLOCK_SIZE) {
+                    for (int i = block.count; i > insertPos; i--) {
+                        block.entries[i] = block.entries[i - 1];
+                    }
+                    block.entries[insertPos] = newEntry;
+                    block.count++;
+                    writeIndexBlock(insertBlockNum, block);
+                } else {
+                    int splitPos = INDEX_BLOCK_SIZE / 2;
+                    IndexBlock newBlock = {};
+                    newBlock.count = 0;
+                    newBlock.nextBlock = block.nextBlock;
+
+                    for (int i = splitPos; i < INDEX_BLOCK_SIZE; i++) {
+                        newBlock.entries[newBlock.count++] = block.entries[i];
+                    }
+                    block.count = splitPos;
+
+                    if (insertPos <= splitPos) {
+                        for (int i = block.count; i > insertPos; i--) {
+                            block.entries[i] = block.entries[i - 1];
+                        }
+                        block.entries[insertPos] = newEntry;
+                        block.count++;
+                    } else {
+                        int newPos = insertPos - splitPos;
+                        for (int i = newBlock.count; i > newPos; i--) {
+                            newBlock.entries[i] = newBlock.entries[i - 1];
+                        }
+                        newBlock.entries[newPos] = newEntry;
+                        newBlock.count++;
+                    }
+
+                    int newBlockNum = appendIndexBlock(newBlock);
+                    block.nextBlock = newBlockNum;
+                    writeIndexBlock(insertBlockNum, block);
+                }
+            }
         } else {
             int valuePos = findValuePos(entry.offset, entry.count, value);
             if (valuePos != -1) return;
