@@ -2,7 +2,6 @@
 #include <fstream>
 #include <string>
 #include <cstring>
-#include <algorithm>
 #include <cstdio>
 
 using namespace std;
@@ -10,6 +9,8 @@ using namespace std;
 const int MAX_INDEX_LEN = 64;
 const string INDEX_FILE = "storage.idx";
 const string DATA_FILE = "storage.dat";
+
+const int NUM_KEYS = 100000;
 
 struct IndexEntry {
     char index[MAX_INDEX_LEN + 1];
@@ -217,6 +218,8 @@ private:
         if (pos < count) {
             for (int i = pos; i < count - 1; i++) values[i] = values[i + 1];
             count--;
+        } else {
+            count = 0;
         }
 
         if (count == 0) {
