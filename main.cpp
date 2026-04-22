@@ -11,8 +11,8 @@ const int MAX_INDEX_LEN = 64;
 const string INDEX_FILE = "storage.idx";
 const string DATA_FILE = "storage.dat";
 
-const int INDEX_BLOCK_SIZE = 512;
-const int MAX_INDEX_BLOCKS = 400;
+const int INDEX_BLOCK_SIZE = 1024;
+const int MAX_INDEX_BLOCKS = 100;
 
 struct IndexEntry {
     char index[MAX_INDEX_LEN + 1];
@@ -232,6 +232,15 @@ private:
         if (data.is_open()) {
             data.seekg(offset, ios::beg);
             data.read((char*)values, count * sizeof(int));
+            data.close();
+        }
+    }
+
+    void writeValues(int offset, const int* values, int count) {
+        fstream data(dataFile, ios::binary | ios::in | ios::out);
+        if (data.is_open()) {
+            data.seekp(offset, ios::beg);
+            data.write((char*)values, count * sizeof(int));
             data.close();
         }
     }
