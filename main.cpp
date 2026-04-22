@@ -3,256 +3,276 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
-#include <vector>
 #include <cstdio>
 
 using namespace std;
 
 const int MAX_INDEX_LEN = 64;
-const int MAX_FILE_NAME_LEN = 64;
 const string INDEX_FILE = "storage.idx";
+const string DATA_FILE = "storage.dat";
 
 struct IndexEntry {
     char index[MAX_INDEX_LEN + 1];
-    char filename[MAX_FILE_NAME_LEN + 1];
-    int size;  // number of values in this index's file
+    int offset;
+    int count;
 };
 
 class FileStorage {
 private:
     string indexFile;
+    string dataFile;
 
-    int findIndexInFile(const string& key, string& filename, int& size) {
-        ifstream idx(indexFile, ios::binary);
-        if (!idx.is_open()) return -1;
-
-        IndexEntry entry;
-        int pos = 0;
-        int foundPos = -1;
-
-        while (idx.read((char*)&entry, sizeof(IndexEntry))) {
-            int cmp = strcmp(key.c_str(), entry.index);
-            if (cmp == 0) {
-                filename = entry.filename;
-                size = entry.size;
-                foundPos = pos;
-                break;
-            }
-            pos++;
-        }
+    int getIndexEntryCount() {
+        ifstream idx(indexFile, ios::binary | ios::ate);
+        if (!idx.is_open()) return 0;
+        int count = idx.tellg() / sizeof(IndexEntry);
         idx.close();
-        return foundPos;
+        return count;
     }
 
-    int findValueInFile(const string& filename, int value) {
-        ifstream f(filename, ios::binary);
-        if (!f.is_open()) return -1;
-
-        int v;
-        int pos = 0;
-        while (f.read((char*)&v, sizeof(int))) {
-            if (v == value) {
-                f.close();
-                return pos;
-            }
-            pos++;
+    IndexEntry readIndexEntry(int pos) {
+        IndexEntry entry = {};
+        ifstream idx(indexFile, ios::binary);
+        if (idx.is_open()) {
+            idx.seekg(pos * sizeof(IndexEntry), ios::beg);
+            idx.read((char*)&entry, sizeof(IndexEntry));
+            idx.close();
         }
-        f.close();
+        return entry;
+    }
+
+    void writeIndexEntry(int pos, const IndexEntry& entry) {
+        fstream idx(indexFile, ios::binary | ios::in | ios::out);
+        if (idx.is_open()) {
+            idx.seekp(pos * sizeof(IndexEntry), ios::beg);
+            idx.write((char*)&entry, sizeof(IndexEntry));
+            idx.close();
+        }
+    }
+
+    void rewriteIndexFile(const IndexEntry* entries, int count) {
+        ofstream idx(indexFile, ios::binary | ios::trunc);
+        if (idx.is_open()) {
+            idx.write((char*)entries, count * sizeof(IndexEntry));
+            idx.close();
+        }
+    }
+
+    int findIndexPos(const string& key) {
+        int count = getIndexEntryCount();
+        if (count == 0) return -1;
+
+        int left = 0, right = count - 1;
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            IndexEntry entry = readIndexEntry(mid);
+            int cmp = strcmp(key.c_str(), entry.index);
+            if (cmp == 0) return mid;
+            if (cmp < 0) right = mid - 1;
+            else left = mid + 1;
+        }
         return -1;
     }
 
-    void writeValuesToFile(const string& filename, const vector<int>& values) {
-        ofstream f(filename, ios::binary | ios::trunc);
-        if (!f.is_open()) return;
-        for (int v : values) {
-            f.write((char*)&v, sizeof(int));
+    int findInsertPos(const string& key) {
+        int count = getIndexEntryCount();
+        if (count == 0) return 0;
+
+        int left = 0, right = count;
+        while (left < right) {
+            int mid = left + (right - left) / 2;
+            IndexEntry entry = readIndexEntry(mid);
+            if (strcmp(key.c_str(), entry.index) <= 0) right = mid;
+            else left = mid + 1;
         }
-        f.close();
+        return left;
     }
 
-    void readAllValues(const string& filename, vector<int>& values) {
-        ifstream f(filename, ios::binary);
-        if (!f.is_open()) return;
-        int v;
-        while (f.read((char*)&v, sizeof(int))) {
-            values.push_back(v);
+    void insertIndexEntry(const IndexEntry& entry, int pos) {
+        int count = getIndexEntryCount();
+        IndexEntry* entries = new IndexEntry[count + 1];
+
+        for (int i = 0; i < pos; i++) {
+            entries[i] = readIndexEntry(i);
         }
-        f.close();
+        entries[pos] = entry;
+        for (int i = pos; i < count; i++) {
+            entries[i + 1] = readIndexEntry(i);
+        }
+
+        rewriteIndexFile(entries, count + 1);
+        delete[] entries;
     }
 
-    void insertIndexEntry(const string& key, const string& filename, int size) {
-        vector<IndexEntry> entries;
-        ifstream idx(indexFile, ios::binary);
-        if (idx.is_open()) {
-            IndexEntry entry;
-            while (idx.read((char*)&entry, sizeof(IndexEntry))) {
-                entries.push_back(entry);
-            }
-            idx.close();
+    void deleteIndexEntry(int pos) {
+        int count = getIndexEntryCount();
+        if (count <= 1) {
+            std::remove(indexFile.c_str());
+            return;
         }
 
-        IndexEntry newEntry;
-        strncpy(newEntry.index, key.c_str(), MAX_INDEX_LEN);
-        newEntry.index[MAX_INDEX_LEN] = '\0';
-        strncpy(newEntry.filename, filename.c_str(), MAX_FILE_NAME_LEN);
-        newEntry.filename[MAX_FILE_NAME_LEN] = '\0';
-        newEntry.size = size;
+        IndexEntry* entries = new IndexEntry[count - 1];
+        for (int i = 0; i < pos; i++) {
+            entries[i] = readIndexEntry(i);
+        }
+        for (int i = pos + 1; i < count; i++) {
+            entries[i - 1] = readIndexEntry(i);
+        }
 
-        bool inserted = false;
-        for (size_t i = 0; i < entries.size(); i++) {
-            if (strcmp(key.c_str(), entries[i].index) < 0) {
-                entries.insert(entries.begin() + i, newEntry);
-                inserted = true;
+        rewriteIndexFile(entries, count - 1);
+        delete[] entries;
+    }
+
+    void readValues(int offset, int count, int* values) {
+        ifstream data(dataFile, ios::binary);
+        if (data.is_open()) {
+            data.seekg(offset, ios::beg);
+            data.read((char*)values, count * sizeof(int));
+            data.close();
+        }
+    }
+
+    void appendValues(const int* values, int count, int& offset) {
+        ofstream data(dataFile, ios::binary | ios::app);
+        if (data.is_open()) {
+            offset = data.tellp();
+            data.write((char*)values, count * sizeof(int));
+            data.close();
+        }
+    }
+
+    int findValuePos(int offset, int count, int value) {
+        int* values = new int[count];
+        readValues(offset, count, values);
+
+        int left = 0, right = count - 1;
+        int result = -1;
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            if (values[mid] == value) {
+                result = mid;
                 break;
             }
+            if (values[mid] < value) left = mid + 1;
+            else right = mid - 1;
         }
-        if (!inserted) entries.push_back(newEntry);
 
-        ofstream outIdx(indexFile, ios::binary | ios::trunc);
-        for (const auto& e : entries) {
-            outIdx.write((char*)&e, sizeof(IndexEntry));
-        }
-        outIdx.close();
+        delete[] values;
+        return result;
     }
 
-    void updateIndexSize(const string& key, int newSize) {
-        vector<IndexEntry> entries;
-        ifstream idx(indexFile, ios::binary);
-        if (idx.is_open()) {
-            IndexEntry entry;
-            while (idx.read((char*)&entry, sizeof(IndexEntry))) {
-                entries.push_back(entry);
-            }
-            idx.close();
-        }
+    void insertValue(int offset, int count, int value, int* newOffset, int* newCount) {
+        int* values = new int[count + 1];
+        readValues(offset, count, values);
 
-        for (auto& e : entries) {
-            if (strcmp(key.c_str(), e.index) == 0) {
-                e.size = newSize;
-                break;
-            }
-        }
+        int pos = 0;
+        while (pos < count && values[pos] < value) pos++;
 
-        ofstream outIdx(indexFile, ios::binary | ios::trunc);
-        for (const auto& e : entries) {
-            outIdx.write((char*)&e, sizeof(IndexEntry));
-        }
-        outIdx.close();
+        for (int i = count; i > pos; i--) values[i] = values[i - 1];
+        values[pos] = value;
+
+        appendValues(values, count + 1, *newOffset);
+        *newCount = count + 1;
+
+        delete[] values;
     }
 
-    void removeIndexEntry(const string& key) {
-        vector<IndexEntry> entries;
-        ifstream idx(indexFile, ios::binary);
-        if (idx.is_open()) {
-            IndexEntry entry;
-            while (idx.read((char*)&entry, sizeof(IndexEntry))) {
-                entries.push_back(entry);
-            }
-            idx.close();
+    void deleteValue(int offset, int count, int value, int* newOffset, int* newCount) {
+        int* values = new int[count];
+        readValues(offset, count, values);
+
+        int pos = 0;
+        while (pos < count && values[pos] != value) pos++;
+
+        if (pos < count) {
+            for (int i = pos; i < count - 1; i++) values[i] = values[i + 1];
+            count--;
         }
 
-        auto it = entries.begin();
-        while (it != entries.end()) {
-            if (strcmp(key.c_str(), it->index) == 0) {
-                it = entries.erase(it);
-                break;
-            } else {
-                ++it;
-            }
+        if (count == 0) {
+            *newOffset = -1;
+            *newCount = 0;
+        } else {
+            appendValues(values, count, *newOffset);
+            *newCount = count;
         }
 
-        ofstream outIdx(indexFile, ios::binary | ios::trunc);
-        for (const auto& e : entries) {
-            outIdx.write((char*)&e, sizeof(IndexEntry));
-        }
-        outIdx.close();
-    }
-
-    string getFilename(const string& key) {
-        return "idx_" + key + ".dat";
+        delete[] values;
     }
 
 public:
-    FileStorage() : indexFile(INDEX_FILE) {}
+    FileStorage() : indexFile(INDEX_FILE), dataFile(DATA_FILE) {}
 
     void find(const string& key) {
-        string filename;
-        int size;
-        findIndexInFile(key, filename, size);
-
-        if (filename.empty() || size == 0) {
+        int pos = findIndexPos(key);
+        if (pos == -1) {
             cout << "null" << endl;
             return;
         }
 
-        vector<int> values;
-        readAllValues(filename, values);
-
-        if (values.empty()) {
+        IndexEntry entry = readIndexEntry(pos);
+        if (entry.count == 0) {
             cout << "null" << endl;
             return;
         }
 
-        for (size_t i = 0; i < values.size(); i++) {
+        int* values = new int[entry.count];
+        readValues(entry.offset, entry.count, values);
+
+        for (int i = 0; i < entry.count; i++) {
             if (i > 0) cout << " ";
             cout << values[i];
         }
         cout << endl;
+
+        delete[] values;
     }
 
     void insert(const string& key, int value) {
-        string filename;
-        int size;
-        findIndexInFile(key, filename, size);
+        int pos = findIndexPos(key);
+        int newOffset, newCount;
 
-        if (filename.empty()) {
-            filename = getFilename(key);
-            ofstream f(filename, ios::binary | ios::trunc);
-            f.write((char*)&value, sizeof(int));
-            f.close();
-            insertIndexEntry(key, filename, 1);
-            return;
+        if (pos == -1) {
+            int* values = new int[1];
+            values[0] = value;
+            appendValues(values, 1, newOffset);
+            delete[] values;
+            newCount = 1;
+
+            IndexEntry entry = {};
+            strncpy(entry.index, key.c_str(), MAX_INDEX_LEN);
+            entry.index[MAX_INDEX_LEN] = '\0';
+            entry.offset = newOffset;
+            entry.count = newCount;
+
+            int insertPos = findInsertPos(key);
+            insertIndexEntry(entry, insertPos);
+        } else {
+            IndexEntry entry = readIndexEntry(pos);
+            int valuePos = findValuePos(entry.offset, entry.count, value);
+            if (valuePos != -1) return;
+
+            insertValue(entry.offset, entry.count, value, &newOffset, &newCount);
+            entry.offset = newOffset;
+            entry.count = newCount;
+            writeIndexEntry(pos, entry);
         }
-
-        vector<int> values;
-        readAllValues(filename, values);
-
-        for (int v : values) {
-            if (v == value) return;
-        }
-
-        values.push_back(value);
-        sort(values.begin(), values.end());
-        writeValuesToFile(filename, values);
-        updateIndexSize(key, values.size());
     }
 
     void remove(const string& key, int value) {
-        string filename;
-        int size;
-        findIndexInFile(key, filename, size);
+        int pos = findIndexPos(key);
+        if (pos == -1) return;
 
-        if (filename.empty()) return;
+        IndexEntry entry = readIndexEntry(pos);
+        int newOffset, newCount;
+        deleteValue(entry.offset, entry.count, value, &newOffset, &newCount);
 
-        vector<int> values;
-        readAllValues(filename, values);
-
-        auto it = values.begin();
-        while (it != values.end()) {
-            if (*it == value) {
-                it = values.erase(it);
-                break;
-            } else {
-                ++it;
-            }
-        }
-
-        if (values.empty()) {
-            removeIndexEntry(key);
-            std::remove(filename.c_str());
+        if (newCount == 0) {
+            deleteIndexEntry(pos);
         } else {
-            writeValuesToFile(filename, values);
-            updateIndexSize(key, values.size());
+            entry.offset = newOffset;
+            entry.count = newCount;
+            writeIndexEntry(pos, entry);
         }
     }
 };
